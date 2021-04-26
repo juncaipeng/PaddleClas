@@ -300,7 +300,8 @@ def run(dataloader,
         lr_scheduler=None,
         epoch=0,
         mode='train',
-        vdl_writer=None):
+        vdl_writer=None,
+        run_batch=100):
     """
     Feed data to the model and fetch the measures and loss
 
@@ -350,6 +351,8 @@ def run(dataloader,
 
     tic = time.time()
     for idx, batch in enumerate(dataloader()):
+        if idx > run_batch:
+            break
         # avoid statistics from warmup time
         if idx == 10:
             metric_list["batch_time"].reset()

@@ -29,7 +29,7 @@ import paddle
 from paddleslim.dygraph.quant import QAT
 
 from ppcls.data import Reader
-from ppcls.utils.config import get_config
+from ppcls.utils.config import get_config, print_config
 from ppcls.utils.save_load import init_model, save_model
 from ppcls.utils import logger
 import program
@@ -56,9 +56,38 @@ def parse_args():
 
 
 def main(args):
+    # vars
+    use_quant = True
+    use_pact = True
+    lr = 0.0001
+    epoch = 1
+    run_batch = 100
+    batch_size = 64
+    num_workers = 1
+    data_dir = '/dataset/ILSVRC2012/'
+    train_file_list = '/dataset/ILSVRC2012/train_list.txt'
+    valid_file_list = '/dataset/ILSVRC2012/val_list.txt'
+    pretrain_dir = './pretrain'
+
+    # ---------
     paddle.seed(12345)
 
-    config = get_config(args.config, overrides=args.override, show=True)
+    config = get_config(args.config, overrides=args.override, show=False)
+    config['TRAIN']['batch_size'] = batch_size
+    config['TRAIN']['file_list'] = train_file_list
+    config['TRAIN']['data_dir'] = data_dir
+    config['TRAIN']['num_workers'] = num_workers
+    config['VALID']['batch_size'] = batch_size
+    config['VALID']['file_list'] = valid_file_list
+    config['VALID']['data_dir'] = data_dir
+    config['VALID']['num_workers'] = num_workers
+    config['epochs'] = epoch
+    config['LEARNING_RATE']['params']['lr'] = lr
+    pretrained_model = os.path.join(pretrain_dir, config['ARCHITECTURE']['name'] + "_pretrained")
+    assert os.path.exists(pretrained_model + ".pdparams")
+    config['pretrained_model'] = pretrained_model
+    print_config(config)
+
     # assign the place
     use_gpu = config.get("use_gpu", True)
     place = paddle.set_device('gpu' if use_gpu else 'cpu')
@@ -71,17 +100,16 @@ def main(args):
         paddle.distributed.init_parallel_env()
 
     net = program.create_model(config.ARCHITECTURE, config.classes_num)
-
-    # prepare to quant
-    quant_config = get_default_quant_config()
-    quant_config["activation_preprocess_type"] = "PACT"
-    quanter = QAT(config=quant_config)
-    quanter.quantize(net)
-
     optimizer, lr_scheduler = program.create_optimizer(
         config, parameter_list=net.parameters())
-
     init_model(config, net, optimizer)
+
+    # prepare to quant
+    if use_quant:
+        quant_config = get_default_quant_config()
+        quant_config["activation_preprocess_type"] = "PACT" if use_pact else None 
+        quanter = QAT(config=quant_config)
+        quanter.quantize(net)
 
     if config["use_data_parallel"]:
         net = paddle.DataParallel(net)
@@ -98,29 +126,37 @@ def main(args):
         net.train()
         # 1. train with train dataset
         program.run(train_dataloader, config, net, optimizer, lr_scheduler,
-                    epoch_id, 'train')
+                    epoch_id, 'train', run_batch=run_batch)
 
         # 2. validate with validate dataset
         if config.validate and epoch_id % config.valid_interval == 0:
             net.eval()
             with paddle.no_grad():
                 top1_acc = program.run(valid_dataloader, config, net, None,
-                                       None, epoch_id, 'valid')
+                                       None, epoch_id, 'valid', run_batch=run_batch)
             if top1_acc > best_top1_acc:
                 best_top1_acc = top1_acc
                 best_top1_epoch = epoch_id
                 model_path = os.path.join(config.model_save_dir,
                                           config.ARCHITECTURE["name"])
-                save_model(net, optimizer, model_path, "best_model")
+                #save_model(net, optimizer, model_path, "best_model")
             message = "The best top1 acc {:.5f}, in epoch: {:d}".format(
                 best_top1_acc, best_top1_epoch)
             logger.info(message)
-
+        
+        '''
         # 3. save the persistable model
         if epoch_id % config.save_interval == 0:
             model_path = os.path.join(config.model_save_dir,
                                       config.ARCHITECTURE["name"])
             save_model(net, optimizer, model_path, epoch_id)
+        '''
+        if use_quant:
+            save_model_path = os.path.join(config.model_save_dir, config.ARCHITECTURE["name"])
+            save_model_path = save_model_path + "_pact" if use_pact else ""
+            quanter.save_quantized_model(net, model_path, 
+                input_spec=[paddle.static.InputSpec(shape=[None, 3, 224, 224], dtype='float32')])
+            print('finish')
 
 
 if __name__ == '__main__':
