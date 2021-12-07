@@ -187,6 +187,7 @@ class Engine(object):
 
         # build model
         self.model = build_model(self.config["Arch"])
+        print(self.model)
         # set @to_static for benchmark, skip this by default.
         apply_to_static(self.config, self.model)
 
