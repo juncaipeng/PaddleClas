@@ -61,9 +61,8 @@ from ppcls.arch.backbone.model_zoo.hardnet import HarDNet68, HarDNet85, HarDNet3
 from ppcls.arch.backbone.model_zoo.cspnet import CSPDarkNet53
 from ppcls.arch.backbone.variant_models.resnet_variant import ResNet50_last_stage_stride1
 from ppcls.arch.backbone.variant_models.vgg_variant import VGG19Sigmoid
-from ppcls.arch.backbone.model_zoo._bisenet import *
 from ppcls.arch.backbone.model_zoo._stdcnet import *
-from ppcls.arch.backbone.model_zoo._stdcnet_pp import *
+#from ppcls.arch.backbone.model_zoo._stdcnet_pp import *
 
 
 def get_apis():

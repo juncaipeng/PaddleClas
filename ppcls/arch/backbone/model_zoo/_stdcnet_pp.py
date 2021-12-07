@@ -19,11 +19,9 @@ import paddle.nn.functional as F
 
 import math
 import sys
-sys.path.append("/ssd2/pengjuncai/PaddleSeg")
+#sys.path.append("/ssd2/pengjuncai/PaddleSeg")
 
-from paddleseg.models import layers
 from paddleseg.cvlibs import param_init
-from paddleseg.models.layers.layer_libs import SyncBatchNorm
 from paddleseg.models.backbones import transformer_utils
 
 from ppcls.utils.save_load import load_dygraph_pretrain, load_dygraph_pretrain_from_url
@@ -311,7 +309,7 @@ class ConvBNRelu(nn.Layer):
             stride=stride,
             padding=kernel // 2,
             bias_attr=False)
-        self.bn = SyncBatchNorm(out_planes, data_format='NCHW')
+        self.bn = nn.SyncBatchNorm(out_planes, data_format='NCHW')
         self.relu = nn.ReLU()
 
     def forward(self, x):
