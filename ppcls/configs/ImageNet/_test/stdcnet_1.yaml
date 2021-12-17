@@ -2,7 +2,7 @@
 Global:
   checkpoints: null
   pretrained_model: null
-  output_dir: ./output/
+  output_dir: ./output/STDCNet_1
   device: gpu
   save_interval: 1
   eval_during_train: True
@@ -16,7 +16,7 @@ Global:
 
 # model architecture
 Arch:
-  name: STDC1NetClass
+  name: STDCNet_1
  
 # loss function config for traing/eval process
 Loss:
