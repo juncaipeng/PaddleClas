@@ -1932,7 +1932,7 @@ class CatBottleneck_new_act(nn.Layer):
             self.skip = nn.AvgPool2D(kernel_size=3, stride=2, padding=1)
             stride = 1
 
-        act = nn.PReLU
+        act = nn.Hardswish
         for idx in range(block_num):
             if idx == 0:
                 self.conv_list.append(
@@ -3084,6 +3084,206 @@ class CatBottleneck_conv5(nn.Layer):
         return out
 
 
+class ConvBN(nn.Layer):
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 kernel_size,
+                 stride,
+                 padding,
+                 groups=1):
+        super(ConvBN, self).__init__()
+        self.conv = nn.Conv2D(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            groups=groups,
+            bias_attr=False)
+        self.bn = nn.BatchNorm2D(num_features=out_channels)
+
+    def forward(self, x):
+        y = self.conv(x)
+        y = self.bn(y)
+        return y
+
+
+class RepVGGBlock(nn.Layer):
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 kernel_size=3,
+                 stride=1,
+                 padding=1,
+                 dilation=1,
+                 groups=1,
+                 padding_mode='zeros'):
+        super(RepVGGBlock, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        self.dilation = dilation
+        self.groups = groups
+        self.padding_mode = padding_mode
+
+        assert kernel_size == 3
+        assert padding == 1
+
+        padding_11 = padding - kernel_size // 2
+
+        self.nonlinearity = nn.ReLU()
+
+        self.rbr_identity = nn.BatchNorm2D(
+            num_features=in_channels
+        ) if out_channels == in_channels and stride == 1 else None
+        self.rbr_dense = ConvBN(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            groups=groups)
+        self.rbr_1x1 = ConvBN(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=1,
+            stride=stride,
+            padding=padding_11,
+            groups=groups)
+
+    def forward(self, inputs):
+        if not self.training:
+            return self.nonlinearity(self.rbr_reparam(inputs))
+
+        if self.rbr_identity is None:
+            id_out = 0
+        else:
+            id_out = self.rbr_identity(inputs)
+        return self.nonlinearity(
+            self.rbr_dense(inputs) + self.rbr_1x1(inputs) + id_out)
+
+    def eval(self):
+        if not hasattr(self, 'rbr_reparam'):
+            self.rbr_reparam = nn.Conv2D(
+                in_channels=self.in_channels,
+                out_channels=self.out_channels,
+                kernel_size=self.kernel_size,
+                stride=self.stride,
+                padding=self.padding,
+                dilation=self.dilation,
+                groups=self.groups,
+                padding_mode=self.padding_mode)
+        self.training = False
+        kernel, bias = self.get_equivalent_kernel_bias()
+        self.rbr_reparam.weight.set_value(kernel)
+        self.rbr_reparam.bias.set_value(bias)
+        for layer in self.sublayers():
+            layer.eval()
+
+    def get_equivalent_kernel_bias(self):
+        kernel3x3, bias3x3 = self._fuse_bn_tensor(self.rbr_dense)
+        kernel1x1, bias1x1 = self._fuse_bn_tensor(self.rbr_1x1)
+        kernelid, biasid = self._fuse_bn_tensor(self.rbr_identity)
+        return kernel3x3 + self._pad_1x1_to_3x3_tensor(
+            kernel1x1) + kernelid, bias3x3 + bias1x1 + biasid
+
+    def _pad_1x1_to_3x3_tensor(self, kernel1x1):
+        if kernel1x1 is None:
+            return 0
+        else:
+            return nn.functional.pad(kernel1x1, [1, 1, 1, 1])
+
+    def _fuse_bn_tensor(self, branch):
+        if branch is None:
+            return 0, 0
+        if isinstance(branch, ConvBN):
+            kernel = branch.conv.weight
+            running_mean = branch.bn._mean
+            running_var = branch.bn._variance
+            gamma = branch.bn.weight
+            beta = branch.bn.bias
+            eps = branch.bn._epsilon
+        else:
+            assert isinstance(branch, nn.BatchNorm2D)
+            if not hasattr(self, 'id_tensor'):
+                input_dim = self.in_channels // self.groups
+                kernel_value = np.zeros(
+                    (self.in_channels, input_dim, 3, 3), dtype=np.float32)
+                for i in range(self.in_channels):
+                    kernel_value[i, i % input_dim, 1, 1] = 1
+                self.id_tensor = paddle.to_tensor(kernel_value)
+            kernel = self.id_tensor
+            running_mean = branch._mean
+            running_var = branch._variance
+            gamma = branch.weight
+            beta = branch.bias
+            eps = branch._epsilon
+        std = (running_var + eps).sqrt()
+        t = (gamma / std).reshape((-1, 1, 1, 1))
+        return kernel * t, beta - running_mean * gamma / std
+
+class CatBottleneck_repvgg(nn.Layer):
+    def __init__(self, in_planes, out_planes, block_num=3, stride=1):
+        super().__init__()
+        assert block_num > 1, "block number should be larger than 1."
+        self.conv_list = nn.LayerList()
+        self.stride = stride
+        if stride == 2:
+            self.avd_layer = nn.Sequential(
+                nn.Conv2D(
+                    out_planes // 2,
+                    out_planes // 2,
+                    kernel_size=3,
+                    stride=2,
+                    padding=1,
+                    groups=out_planes // 2,
+                    bias_attr=False),
+                nn.BatchNorm2D(out_planes // 2),
+            )
+            self.skip = nn.AvgPool2D(kernel_size=3, stride=2, padding=1)
+            stride = 1
+
+        for idx in range(block_num):
+            if idx == 0:
+                self.conv_list.append(
+                    ConvBNRelu(in_planes, out_planes // 2, kernel=1))
+            elif idx == 1 and block_num == 2:
+                self.conv_list.append(
+                    RepVGGBlock(out_planes // 2, out_planes // 2))
+            elif idx == 1 and block_num > 2:
+                self.conv_list.append(
+                    RepVGGBlock(out_planes // 2, out_planes // 4))
+            elif idx < block_num - 1:
+                self.conv_list.append(
+                    RepVGGBlock(out_planes // int(math.pow(2, idx)),
+                               out_planes // int(math.pow(2, idx + 1))))
+            else:
+                self.conv_list.append(
+                    RepVGGBlock(out_planes // int(math.pow(2, idx)),
+                               out_planes // int(math.pow(2, idx))))
+
+    def forward(self, x):
+        out_list = []
+        out1 = self.conv_list[0](x)
+        for idx, conv in enumerate(self.conv_list[1:]):
+            if idx == 0:
+                if self.stride == 2:
+                    out = conv(self.avd_layer(out1))
+                else:
+                    out = conv(out1)
+            else:
+                out = conv(out)
+            out_list.append(out)
+
+        if self.stride == 2:
+            out1 = self.skip(out1)
+        out_list.insert(0, out1)
+        out = paddle.concat(out_list, axis=1)
+        return out
+
 class AttenNone(nn.Layer):
     def __init__(self, in_ch):
         super().__init__()
@@ -3148,38 +3348,15 @@ class STDCNet_pp_1(nn.Layer):
                  layers=[2, 2, 2],
                  layers_expand=[4, 8, 16],
                  block_num=4,
-                 block_type="cat",
+                 block_type="CatBottleneck",
                  num_classes=1000,
                  dropout=0.20,
                  atten_type='AttenNone',
                  pretrained=None):
         super().__init__()
 
-        block_dict = {
-            "cat": CatBottleneck,
-            "add": AddBottleneck,
-            "dilation_2": CatBottleneck_dilation_2,
-            "gap_no_conv": CatBottleneck_gap_no_conv,
-            "shuffle": CatBottleneck_shuffle,
-            "split": CatBottleneck_split,
-            "repvgg": None,
-            "last_se": CatBottleneck_last_se,
-            "dilation_pool": CatBottleneck_dilation_pool,
-            "dw": CatBottleneck_dw,
-            "last_pool": CatBottleneck_last_pool,
-            "dilation_1": CatBottleneck_dilation_1,
-            "dw_pool3": CatBottleneck_dw_pool3,
-            "dw_pool5": CatBottleneck_dw_pool5,
-            "dw_pool7": CatBottleneck_dw_pool7,
-            "dw_dilation": CatBottleneck_dw_dilation,
-            "dw_dilation_pool": CatBottleneck_dw_dilation_pool,
-            "conv5": CatBottleneck_conv5,
-            "short_cut": CatBottleneck_add_short_cut,
-        }
-
         print("block_type:" + block_type)
-        assert block_type in block_dict
-        block = block_dict[block_type]
+        block = eval(block_type)
         self.feat_channels = [v * base for v in layers_expand]
 
         self.features = self._make_layers(base, layers, layers_expand, block_num, block)
