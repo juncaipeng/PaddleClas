@@ -1605,10 +1605,14 @@ class ConvBNRelu(nn.Layer):
             bias_attr=False,
             groups=groups)
         self.bn = nn.SyncBatchNorm(out_planes, data_format='NCHW')
-        self.act = act()
+        self.use_act = True if act is not None else False
+        if self.use_act:
+            self.act = act()
 
     def forward(self, x):
-        out = self.act(self.bn(self.conv(x)))
+        out = self.bn(self.conv(x))
+        if self.use_act:
+            out = self.act(out)
         return out
 
 
@@ -3079,6 +3083,64 @@ class CatBottleneck_conv5(nn.Layer):
         out = paddle.concat(out_list, axis=1)
         return out
 
+
+class AttenNone(nn.Layer):
+    def __init__(self, in_ch):
+        super().__init__()
+
+    def forward(self, x):
+        return x
+
+class AttenSE_conv(nn.Layer):
+    def __init__(self, ch, ratio=16):
+        super().__init__()
+        self.fc1 = nn.Conv2D(ch, ch//ratio, 1, bias_attr=False)
+        self.fc2 = nn.Conv2D(ch//ratio, ch, 1, bias_attr=False)
+
+    def forward(self, x):
+        atten = F.adaptive_avg_pool2d(x, 1)
+        atten = F.relu(self.fc1(atten))
+        atten = F.sigmoid(self.fc2(atten))
+        out = atten * x
+        return out
+
+class AttenSE_linear(nn.Layer):
+    def __init__(self, ch, ratio=16):
+        super().__init__()
+        self.fc1 = nn.Linear(ch, ch//ratio, bias_attr=False)
+        self.fc2 = nn.Linear(ch//ratio, ch, bias_attr=False)
+
+    def forward(self, x):
+        atten = F.adaptive_avg_pool2d(x, 1)
+        atten = paddle.squeeze(atten, axis=(2,3))
+        atten = F.relu(self.fc1(atten))
+        atten = F.sigmoid(self.fc2(atten))
+        atten = paddle.unsqueeze(atten, axis=(2,3))
+        out = atten * x
+        return out
+
+class AttenSESimple_1(nn.Layer):
+    def __init__(self, ch):
+        super().__init__()
+        self.fc = nn.Conv2D(ch, ch, 1, bias_attr=False)
+
+    def forward(self, x):
+        atten = F.adaptive_avg_pool2d(x, 1)
+        atten = F.sigmoid(self.fc(atten))
+        out = x + atten * x
+        return out
+
+class AttenSESimple_2(nn.Layer):
+    def __init__(self, ch):
+        super().__init__()
+        self.fc = nn.Conv2D(ch, ch, 1, bias_attr=False)
+
+    def forward(self, x):
+        atten = F.adaptive_avg_pool2d(x, 1)
+        atten = F.sigmoid(self.fc(atten))
+        out = atten * x
+        return out
+
 class STDCNet_pp_1(nn.Layer):
     '''support all block type'''
     def __init__(self,
@@ -3089,6 +3151,7 @@ class STDCNet_pp_1(nn.Layer):
                  block_type="cat",
                  num_classes=1000,
                  dropout=0.20,
+                 atten_type='AttenNone',
                  pretrained=None):
         super().__init__()
 
@@ -3111,6 +3174,7 @@ class STDCNet_pp_1(nn.Layer):
             "dw_dilation": CatBottleneck_dw_dilation,
             "dw_dilation_pool": CatBottleneck_dw_dilation_pool,
             "conv5": CatBottleneck_conv5,
+            "short_cut": CatBottleneck_add_short_cut,
         }
 
         print("block_type:" + block_type)
@@ -3133,15 +3197,30 @@ class STDCNet_pp_1(nn.Layer):
         self.x16 = nn.Sequential(self.features[idx[0]:idx[1]])
         self.x32 = nn.Sequential(self.features[idx[1]:])
 
+        print("atten_type:" + atten_type)
+        atten = eval(atten_type)
+        self.f4_atten = atten(base)
+        self.f8_atten = atten(self.feat_channels[0])
+        self.f16_atten = atten(self.feat_channels[1])
+        self.f32_atten = atten(self.feat_channels[2])
+
         self.pretrained = pretrained
         self.init_weight()
 
     def forward(self, x):
         feat2 = self.x2(x)
+
         feat4 = self.x4(feat2)
+        feat4 = self.f4_atten(feat4)
+        
         feat8 = self.x8(feat4)
+        feat8 = self.f8_atten(feat8)
+        
         feat16 = self.x16(feat8)
+        feat16 = self.f16_atten(feat16)
+        
         feat32 = self.x32(feat16)
+        feat32 = self.f32_atten(feat32)
 
         out = self.conv_last(feat32).pow(2)
         out = F.adaptive_avg_pool2d(out, 1)
@@ -3153,22 +3232,26 @@ class STDCNet_pp_1(nn.Layer):
         return out
 
     def _make_layers(self, base, layers, layers_expand, block_num, block):
-        assert layers == [2, 2, 2]
-        assert len(layers) == len(layers_expand)
+        assert len(layers) == 3 and len(layers_expand) == 3
 
         features = []
         features += [ConvBNRelu(3, base // 2, 3, 2)]
         features += [ConvBNRelu(base // 2, base, 3, 2)]
 
-        r0, r1, r2 = layers_expand[0], layers_expand[1], layers_expand[2] 
+        l0, l1, l2 = layers[0], layers[1], layers[2]
+        r0, r1, r2 = layers_expand[0], layers_expand[1], layers_expand[2]
+
         features.append(block(base, base * r0, block_num, 2))
-        features.append(block(base * r0, base * r0, block_num, 1))
+        for i in range(l0 - 1):
+            features.append(block(base * r0, base * r0, block_num, 1))
 
         features.append(block(base * r0, base * r1, block_num, 2))
-        features.append(block(base * r1, base * r1, block_num, 1))
+        for i in range(l1 - 1):
+            features.append(block(base * r1, base * r1, block_num, 1))
 
         features.append(block(base * r1, base * r2, block_num, 2))
-        features.append(block(base * r2, base * r2, block_num, 1))
+        for i in range(l2 - 1):
+            features.append(block(base * r2, base * r2, block_num, 1))
 
         return nn.Sequential(*features)
 
