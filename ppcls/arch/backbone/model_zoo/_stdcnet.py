@@ -19,6 +19,7 @@ import paddle.nn.functional as F
 
 import math
 import sys
+import numpy as np
 
 
 from ppcls.utils.save_load import load_dygraph_pretrain, load_dygraph_pretrain_from_url
@@ -3207,7 +3208,7 @@ class RepVGGBlock(nn.Layer):
             beta = branch.bn.bias
             eps = branch.bn._epsilon
         else:
-            assert isinstance(branch, nn.BatchNorm2D)
+            assert isinstance(branch, (nn.BatchNorm2D, nn.SyncBatchNorm))
             if not hasattr(self, 'id_tensor'):
                 input_dim = self.in_channels // self.groups
                 kernel_value = np.zeros(
@@ -3442,6 +3443,11 @@ class STDCNet_pp_1(nn.Layer):
         if self.pretrained is not None:
             utils.load_pretrained_model(self, self.pretrained)
 
+    def eval(self):
+        self.training = False
+        for layer in self.sublayers():
+            layer.training = False
+            layer.eval()
 
 
 def _load_pretrained(pretrained, model, model_url, use_ssld=False):
