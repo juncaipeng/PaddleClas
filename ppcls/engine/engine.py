@@ -187,8 +187,8 @@ class Engine(object):
 
         # build model
         self.model = build_model(self.config["Arch"])
-        if self.mode == "train":
-            self.model = paddle.nn.SyncBatchNorm.convert_sync_batchnorm(self.model)
+        #if self.mode == "train":
+        #    self.model = paddle.nn.SyncBatchNorm.convert_sync_batchnorm(self.model)
         print(self.model)
         # set @to_static for benchmark, skip this by default.
         apply_to_static(self.config, self.model)
