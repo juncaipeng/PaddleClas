@@ -1891,25 +1891,54 @@ class AttenSESimple_2(nn.Layer):
         out = atten * x
         return out
 
-class STDCNet_pp_1(nn.Layer):
-    '''support all block type'''
+
+class STDCNet_pp_2(nn.Layer):
+
     def __init__(self,
                  base=64,
                  layers=[2, 2, 2],
                  layers_expand=[4, 8, 16],
                  block_num=4,
-                 block_type="CatBottleneck",
+                 block_type="cat",
                  num_classes=1000,
                  dropout=0.20,
                  atten_type='AttenNone',
                  pretrained=None):
         super().__init__()
 
-        print("block_type:" + block_type)
-        block = eval(block_type)
-        self.feat_channels = [v * base for v in layers_expand]
+        block_dict = {
+            "cat": CatBottleneck,
+            "add": AddBottleneck,
+            "dilation_2": CatBottleneck_dilation_2,
+            "gap_no_conv": CatBottleneck_gap_no_conv,
+            "shuffle": CatBottleneck_shuffle,
+            "split": CatBottleneck_split,
+            "repvgg": None,
+            "last_se": CatBottleneck_last_se,
+            "dilation_pool": CatBottleneck_dilation_pool,
+            "dw": CatBottleneck_dw,
+            "last_pool": CatBottleneck_last_pool,
+            "dilation_1": CatBottleneck_dilation_1,
+            "dw_pool3": CatBottleneck_dw_pool3,
+            "dw_pool5": CatBottleneck_dw_pool5,
+            "dw_pool7": CatBottleneck_dw_pool7,
+            "dw_dilation": CatBottleneck_dw_dilation,
+            "dw_dilation_pool": CatBottleneck_dw_dilation_pool,
+            "conv5": CatBottleneck_conv5,
+            "short_cut": CatBottleneck_add_short_cut,
+        }
 
-        self.features = self._make_layers(base, layers, layers_expand, block_num, block)
+        print("block_type:" + block_type)
+        assert block_type in block_dict
+        block = block_dict[block_type]
+
+        assert len(layers) == 3 and len(layers_expand) == 3
+        self.layers = layers
+        self.feat_channels = [base // 2, base]
+        self.feat_channels.extend([v * base for v in layers_expand])
+
+        self.features = self._make_layers(base, layers, layers_expand,
+                                          block_num, block)
 
         self.conv_last = ConvBNRelu(self.feat_channels[-1], 1024, 1, 1)
         self.fc = nn.Linear(1024, 1024, bias_attr=False)
@@ -1917,39 +1946,28 @@ class STDCNet_pp_1(nn.Layer):
         self.dropout = nn.Dropout(p=dropout)
         self.linear = nn.Linear(1024, num_classes, bias_attr=False)
 
-        self.x2 = nn.Sequential(self.features[:1])
-        self.x4 = nn.Sequential(self.features[1:2])
-        idx = (2 + layers[0], 2 + layers[0] + layers[1])
-        self.x8 = nn.Sequential(self.features[2:idx[0]])
-        self.x16 = nn.Sequential(self.features[idx[0]:idx[1]])
-        self.x32 = nn.Sequential(self.features[idx[1]:])
-
-        print("atten_type:" + atten_type)
-        atten = eval(atten_type)
-        self.f4_atten = atten(base)
-        self.f8_atten = atten(self.feat_channels[0])
-        self.f16_atten = atten(self.feat_channels[1])
-        self.f32_atten = atten(self.feat_channels[2])
-
         self.pretrained = pretrained
         self.init_weight()
 
     def forward(self, x):
-        feat2 = self.x2(x)
+        out_feats = []
 
-        feat4 = self.x4(feat2)
-        feat4 = self.f4_atten(feat4)
-        
-        feat8 = self.x8(feat4)
-        feat8 = self.f8_atten(feat8)
-        
-        feat16 = self.x16(feat8)
-        feat16 = self.f16_atten(feat16)
-        
-        feat32 = self.x32(feat16)
-        feat32 = self.f32_atten(feat32)
+        x = self.features[0](x)
+        out_feats.append(x)
 
-        out = self.conv_last(feat32).pow(2)
+        x = self.features[1](x)
+        out_feats.append(x)
+
+        idx = [[2, 2 + self.layers[0]],
+               [2 + self.layers[0], 2 + sum(self.layers[0:2])],
+               [2 + sum(self.layers[0:2]), 2 + sum(self.layers)]]
+
+        for start_idx, end_idx in idx:
+            for i in range(start_idx, end_idx):
+                x = self.features[i](x)
+                out_feats.append(x)
+
+        out = self.conv_last(out_feats[-1]).pow(2)
         out = F.adaptive_avg_pool2d(out, 1)
         out = out.flatten(1)
         out = self.fc(out)
@@ -1969,15 +1987,15 @@ class STDCNet_pp_1(nn.Layer):
         r0, r1, r2 = layers_expand[0], layers_expand[1], layers_expand[2]
 
         features.append(block(base, base * r0, block_num, 2))
-        for i in range(l0 - 1):
+        for _ in range(l0 - 1):
             features.append(block(base * r0, base * r0, block_num, 1))
 
         features.append(block(base * r0, base * r1, block_num, 2))
-        for i in range(l1 - 1):
+        for _ in range(l1 - 1):
             features.append(block(base * r1, base * r1, block_num, 1))
 
         features.append(block(base * r1, base * r2, block_num, 2))
-        for i in range(l2 - 1):
+        for _ in range(l2 - 1):
             features.append(block(base * r2, base * r2, block_num, 1))
 
         return nn.Sequential(*features)
@@ -1991,12 +2009,6 @@ class STDCNet_pp_1(nn.Layer):
                 param_init.constant_init(layer.bias, value=0.0)
         if self.pretrained is not None:
             utils.load_pretrained_model(self, self.pretrained)
-
-    def eval(self):
-        self.training = False
-        for layer in self.sublayers():
-            layer.training = False
-            layer.eval()
 
 
 def _load_pretrained(pretrained, model, model_url, use_ssld=False):
@@ -2012,19 +2024,19 @@ def _load_pretrained(pretrained, model, model_url, use_ssld=False):
         )
 
 def STDCNet_1(pretrained=False, use_ssld=False, **kwargs):
-    model = STDCNet_pp_1(base=64, layers=[2, 2, 2], layers_expand=[4, 8, 16], **kwargs)
+    model = STDCNet_pp_2(base=64, layers=[2, 2, 2], layers_expand=[4, 8, 16], **kwargs)
     _load_pretrained(
         pretrained, model, "", use_ssld=use_ssld)
     return model
 
 def STDCNet_2(pretrained=False, use_ssld=False, **kwargs):
-    model = STDCNet_pp_1(base=64, layers=[4, 5, 3], **kwargs)
+    model = STDCNet_pp_2(base=64, layers=[4, 5, 3], **kwargs)
     _load_pretrained(
         pretrained, model, "", use_ssld=use_ssld)
     return model
 
 def STDCNet_3(pretrained=False, use_ssld=False, **kwargs):
-    model = STDCNet_pp_1(base=64, layers=[2, 2, 2], layers_expand=[4, 8, 8], **kwargs)
+    model = STDCNet_pp_2(base=64, layers=[2, 2, 2], layers_expand=[4, 8, 8], **kwargs)
     _load_pretrained(
         pretrained, model, "", use_ssld=use_ssld)
     return model
