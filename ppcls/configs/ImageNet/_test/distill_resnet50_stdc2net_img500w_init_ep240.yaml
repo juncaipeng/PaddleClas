@@ -2,12 +2,12 @@
 Global:
   checkpoints: null
   pretrained_model: null
-  output_dir: ./output/tmp
+  output_dir: ./output/resnet50_distill_stdc2net
   device: gpu
   save_interval: 1
   eval_during_train: True
   eval_interval: 1
-  epochs: 360
+  epochs: 240
   print_batch_step: 10
   use_visualdl: False
   # used for static mode and model export
@@ -29,7 +29,7 @@ Arch:
         pretrained: True
         use_ssld: True
     - Student:
-        name: STDCNet_1
+        name: STDCNet_2
         pretrained: False
 
   infer_model_name: "Student"
@@ -61,7 +61,7 @@ Optimizer:
   momentum: 0.9
   lr:
     name: Cosine
-    learning_rate: 0.1  # base: 0.1
+    learning_rate: 0.1  # base: 0.1 for bs=64*4
     warmup_epoch: 5
     warmup_start_lr: 0.01
   regularizer:
