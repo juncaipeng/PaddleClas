@@ -2040,3 +2040,9 @@ def STDCNet_3(pretrained=False, use_ssld=False, **kwargs):
     _load_pretrained(
         pretrained, model, "", use_ssld=use_ssld)
     return model
+
+
+def STDCNet_4(pretrained=False, use_ssld=False, **kwargs):
+    model = STDCNet_pp_2(base=128, layers=[4, 5, 3], layers_expand=[4, 8, 16], **kwargs)
+    _load_pretrained(pretrained, model, "", use_ssld=use_ssld)
+    return model

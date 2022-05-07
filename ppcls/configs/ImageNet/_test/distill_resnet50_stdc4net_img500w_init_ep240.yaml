@@ -2,7 +2,7 @@
 Global:
   checkpoints: null
   pretrained_model: null
-  output_dir: ./output/resnet50_distill_stdc2net
+  output_dir: ./output/resnet50_distill_stdc4net
   device: gpu
   save_interval: 1
   eval_during_train: True
@@ -29,7 +29,7 @@ Arch:
         pretrained: True
         use_ssld: True
     - Student:
-        name: STDCNet_2
+        name: STDCNet_4
         pretrained: False
 
   infer_model_name: "Student"
